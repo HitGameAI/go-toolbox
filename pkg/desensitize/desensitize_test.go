@@ -192,10 +192,35 @@ func TestDesensitizeIDCustomOptions(t *testing.T) {
 	opt.IDPrefixVisibleLen = 4
 	opt.IDSuffixVisibleLen = 4
 	assert.Equal(t, "1000**4567", Desensitize("1000234567", UserID, opt))
-	assert.Equal(t, "ORD2****2345", Desensitize("ORD2024010112345", OrderNo, opt))
+	assert.Equal(t, "ORD2********2345", Desensitize("ORD2024010112345", OrderNo, opt))
 
 	// 短字符串：前后缀可见长度之和大于等于长度时全掩码
 	assert.Equal(t, "****", Desensitize("1234", UserID, NewDesensitizeOptions()))
 	// 空字符串直接返回
 	assert.Equal(t, "", Desensitize("", PlayerID))
+}
+
+func TestSensitizeJump(t *testing.T) {
+	// 连续掩码：end=-4 动态保留末尾 4 位，等价手机号脱敏效果
+	assert.Equal(t, "181****8789", SensitizeJump("18175698789", 3, -4, 1))
+	// 跳步 2：从索引 1 开始隔位掩码，end=-1 动态保留最后 1 位
+	assert.Equal(t, "1*1*5*9*7*9", SensitizeJump("18175698789", 1, -1, 2))
+	// 固定区间 [1,4)，跳步默认按 1 处理
+	assert.Equal(t, "1***56789", SensitizeJump("123456789", 1, 4, 1))
+	// end=0 表示到末尾
+	assert.Equal(t, "18*********", SensitizeJump("18175698789", 2, 0, 1))
+	// 跳步数非法时按 1 处理
+	assert.Equal(t, "181****8789", SensitizeJump("18175698789", 3, -4, 0))
+	// 开始位置不小于结束位置时不处理
+	assert.Equal(t, "12345", SensitizeJump("12345", 3, 2, 1))
+	// 负数开始索引：-1 表示最后一个字符
+	assert.Equal(t, "1234*", SensitizeJump("12345", -1, 0, 1))
+	// 负数开始索引超出长度时从 0 开始
+	assert.Equal(t, "*****", SensitizeJump("12345", -20, 0, 1))
+	// 结束索引超出长度时截断到末尾
+	assert.Equal(t, "*****", SensitizeJump("12345", 0, 100, 1))
+	// 中文字符按字符计数
+	assert.Equal(t, "北****区", SensitizeJump("北京市朝阳区", 1, -1, 1))
+	// 空字符串直接返回
+	assert.Equal(t, "", SensitizeJump("", 1, -1, 2))
 }

@@ -14,6 +14,9 @@ package desensitize
 import (
 	"errors"
 	"reflect"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -57,16 +60,113 @@ func RegisterDesensitizer(desensitizerType string, desensitizer Desensitizer) {
 	})
 }
 
+// DesensitizerFactory 参数化脱敏器工厂
+// 根据标签中的整数参数创建脱敏器，如 jump(3,-4,1) 中的 3、-4、1
+type DesensitizerFactory func(params ...int) Desensitizer
+
+var desensitizerFactories map[string]DesensitizerFactory // 存储注册的参数化脱敏器工厂
+
+// RegisterDesensitizerFactory 注册参数化脱敏器工厂
+// @param name: 脱敏器名称（标签中括号前的名称，如 jump）
+// @param factory: 根据参数创建脱敏器的工厂函数
+func RegisterDesensitizerFactory(name string, factory DesensitizerFactory) {
+	syncx.WithLock(&desensitizerMu, func() {
+		if desensitizerFactories == nil {
+			desensitizerFactories = make(map[string]DesensitizerFactory) // 初始化工厂映射
+		}
+		desensitizerFactories[name] = factory // 注册工厂
+	})
+}
+
+// JumpDesensitizer 跳步脱敏器
+// 按开始、结束、跳步参数对字符进行掩码，参数含义见 SensitizeJump
+type JumpDesensitizer struct {
+	start int // 开始索引（含），支持负数
+	end   int // 结束索引（不含），支持负数（-N 表示保留末尾 N 个字符，0 表示到末尾）
+	step  int // 跳步数
+}
+
+// Desensitize 方法实现 按跳步规则对输入的值进行脱敏处理
+func (j *JumpDesensitizer) Desensitize(value string) string {
+	return SensitizeJump(value, j.start, j.end, j.step)
+}
+
+// NewJumpDesensitizer 创建跳步脱敏器
+// 参数依次为开始、结束、跳步，均可省略，省略时默认从头到尾连续掩码
+func NewJumpDesensitizer(params ...int) Desensitizer {
+	jumper := &JumpDesensitizer{step: 1}
+	if len(params) > 0 {
+		jumper.start = params[0]
+	}
+	if len(params) > 1 {
+		jumper.end = params[1]
+	}
+	if len(params) > 2 {
+		jumper.step = params[2]
+	}
+	return jumper
+}
+
+// tagRuleRegex 匹配带参数的脱敏标签，如 jump(3,-4,1)
+var tagRuleRegex = regexp.MustCompile(`^([^\s(),]+)\s*\(([^)]*)\)$`)
+
+// parseParameterizedTag 解析带参数的脱敏标签
+// @param tag: 标签内容，如 jump(3,-4,1)
+// @returns
+//   - 规则名称、整数参数列表、是否为带参数形式
+func parseParameterizedTag(tag string) (name string, params []int, ok bool) {
+	matches := tagRuleRegex.FindStringSubmatch(tag)
+	if matches == nil {
+		return "", nil, false
+	}
+	name = matches[1]
+	argStr := strings.TrimSpace(matches[2])
+	if argStr == "" {
+		return name, nil, true // 无参数形式，如 jump()
+	}
+	for _, part := range strings.Split(argStr, ",") {
+		value, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return "", nil, false // 参数解析失败视为非法标签
+		}
+		params = append(params, value)
+	}
+	return name, params, true
+}
+
+// resolveDesensitizer 解析脱敏器（支持普通名称与带参数形式，需在持有 desensitizerMu 锁时调用）
+// @param tag: 标签内容，如 email 或 jump(3,-4,1)
+// @returns
+//   - 返回脱敏器实例和可能的错误
+func resolveDesensitizer(tag string) (Desensitizer, error) {
+	// 带参数形式：通过工厂创建，如 jump(3,-4,1)
+	if name, params, ok := parseParameterizedTag(tag); ok {
+		if factory, exists := desensitizerFactories[name]; exists {
+			return factory(params...), nil
+		}
+		return nil, errors.New("desensitizer factory not found")
+	}
+	// 普通形式：优先精确匹配已注册的脱敏器
+	if desensitizer, exists := desensitizers[tag]; exists {
+		return desensitizer, nil
+	}
+	// 普通形式未注册时，尝试以默认参数使用工厂，如 jump
+	if factory, exists := desensitizerFactories[tag]; exists {
+		return factory(), nil
+	}
+	return nil, errors.New("desensitizer not found")
+}
+
 // OperateByRule 根据规则进行脱敏操作
-// @param desensitizerType: 脱敏器的类型标识。
+// @param desensitizerType: 脱敏器的类型标识，支持普通名称（如 email）和带参数形式（如 jump(3,-4,1)）。
 // @param in: 需要脱敏的输入值，应该是字符串类型。
 // @returns
 //   - 返回脱敏后的值和可能的错误。
 func OperateByRule(desensitizerType string, in interface{}) (interface{}, error) {
 	return syncx.WithLockReturn(&desensitizerMu, func() (interface{}, error) {
-		operator, ok := desensitizers[desensitizerType] // 查找对应的脱敏器
-		if !ok {
-			return nil, errors.New("desensitizer not found") // 未找到对应的脱敏器
+		operator, err := resolveDesensitizer(desensitizerType) // 解析脱敏器
+		if err != nil {
+			return nil, err
 		}
 		return operator.Desensitize(in.(string)), nil // 执行脱敏操作
 	})
@@ -176,4 +276,7 @@ func init() {
 	RegisterDesensitizer("openid", &DefaultDesensitizer{OpenID})
 	RegisterDesensitizer("unionId", &DefaultDesensitizer{OpenID})
 	RegisterDesensitizer("account", &DefaultDesensitizer{Account})
+
+	// 注册跳步脱敏器工厂：标签格式为 jump(开始,结束,跳步)，如 desensitize:"jump(3,-4,1)"
+	RegisterDesensitizerFactory("jump", NewJumpDesensitizer)
 }

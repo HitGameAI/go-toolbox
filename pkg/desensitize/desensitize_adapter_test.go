@@ -88,10 +88,62 @@ func TestDesensitization_IDTypes(t *testing.T) {
 	assert.Equal(t, "10******67", testObj.UserID)
 	assert.Equal(t, "P2******23", testObj.PlayerID)
 	assert.Equal(t, "o6"+strings.Repeat("*", 19)+"Z3", testObj.OpenID)
-	assert.Equal(t, "o6"+strings.Repeat("*", 20)+"fQ", testObj.UnionID)
+	assert.Equal(t, "o6"+strings.Repeat("*", 21)+"fQ", testObj.UnionID)
 	assert.Equal(t, "OR************45", testObj.OrderNo)
 	assert.Equal(t, "55"+strings.Repeat("*", 32)+"00", testObj.DeviceUUID)
 	assert.Equal(t, "zh****an", testObj.Account)
+}
+
+// 定义跳步脱敏测试结构体
+type TestJumpDesensitizationStruct struct {
+	Phone   string `desensitize:"jump(3,-4,1)"`   // 等价手机号脱敏：保留前 3 后 4
+	Serial  string `desensitize:"jump(0,-2,2)"`   // 从头隔位掩码，保留末尾 2 位
+	Fixed   string `desensitize:"jump(1,4)"`      // 固定区间 [1,4)，跳步默认 1
+	Default string `desensitize:"jump"`           // 默认从头到尾连续掩码
+	Spaced  string `desensitize:"jump(2, -3, 2)"` // 支持参数间空格
+	Chinese string `desensitize:"jump(1,-1,1)"`   // 中文内容按字符计数
+	Empty   string `desensitize:"jump()"`         // 空参数使用默认值
+}
+
+func TestDesensitization_Jump(t *testing.T) {
+	testObj := &TestJumpDesensitizationStruct{
+		Phone:   "18175698789",
+		Serial:  "ABCDEFGHIJ",
+		Fixed:   "123456789",
+		Default: "secret",
+		Spaced:  "1357924680",
+		Chinese: "北京市朝阳区",
+		Empty:   "abcdef",
+	}
+
+	err := Desensitization(testObj)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "181****8789", testObj.Phone)
+	assert.Equal(t, "*B*D*F*HIJ", testObj.Serial)
+	assert.Equal(t, "1***56789", testObj.Fixed)
+	assert.Equal(t, "******", testObj.Default)
+	assert.Equal(t, "13*7*2*680", testObj.Spaced)
+	assert.Equal(t, "北****区", testObj.Chinese)
+	assert.Equal(t, "******", testObj.Empty)
+}
+
+func TestDesensitization_JumpInvalid(t *testing.T) {
+	// 未注册的参数化脱敏器和非法参数：字段均保持原值
+	type TestJumpInvalidStruct struct {
+		Unknown string `desensitize:"jumpUnknown(1,2)"`
+		BadArg  string `desensitize:"jump(1,abc)"`
+	}
+
+	testObj := &TestJumpInvalidStruct{
+		Unknown: "10",
+		BadArg:  "20",
+	}
+
+	err := Desensitization(testObj)
+	assert.NoError(t, err)
+	assert.Equal(t, "10", testObj.Unknown)
+	assert.Equal(t, "20", testObj.BadArg)
 }
 
 func TestDesensitization_NonStruct(t *testing.T) {

@@ -100,6 +100,55 @@ func SensitiveData(str string, start, end int) string {
 	return stringx.Hide(str, start, end)
 }
 
+// SensitizeJump 跳步脱敏：掩码 [start, end) 区间内从 start 开始、以 step 为步长跳步选取的字符
+// start：开始索引（含），支持负数（-1 表示最后一个字符，按实际长度动态换算）
+// end：结束索引（不含），支持负数动态换算（-N 表示保留末尾 N 个字符，0 表示到末尾）
+// step：跳步数（<=0 时按 1 处理，1 为连续掩码，2 为隔位掩码）
+func SensitizeJump(str string, start, end, step int) string {
+	// 如果数据为空，则返回空字符串
+	if validator.IsEmptyValue(reflect.ValueOf(str)) {
+		return str
+	}
+
+	// 获取字符数量
+	charCount := utf8.RuneCountInString(str)
+
+	// 负数开始索引按实际长度动态换算为绝对索引
+	if start < 0 {
+		start += charCount
+	}
+
+	// 结束索引 <=0 时按实际长度动态换算：-N 即保留末尾 N 个字符，0 表示到末尾
+	if end <= 0 {
+		end += charCount
+	}
+
+	// 边界修正
+	if start < 0 {
+		start = 0
+	}
+	if end > charCount {
+		end = charCount
+	}
+
+	// 开始位置不小于结束位置时无需脱敏
+	if start >= end {
+		return str
+	}
+
+	// 跳步数非法时按连续掩码处理
+	if step <= 0 {
+		step = 1
+	}
+
+	// 按跳步掩码指定位置的字符
+	runes := []rune(str)
+	for i := start; i < end; i += step {
+		runes[i] = '*'
+	}
+	return string(runes)
+}
+
 // 手机号脱敏
 func SensitizePhoneNumber(str string, start, end int) string {
 	// 空判断

@@ -239,7 +239,10 @@ func TestTimerLargeRounds(t *testing.T) {
 		return fired.Load() > 0
 	}, 400*time.Millisecond, 10*time.Millisecond, "大延迟任务不应提前触发")
 
-	waitFired(t, &fired, 1, 300*time.Millisecond)
+	// Windows 定时器分辨率 15.6ms：50 ticks 实际 ≈ 780ms > 名义 500ms，
+	// 原 300ms 余量（截止 ~700ms）会产生平台性假失败；本测试只验证多圈任务最终触发
+	// （圈数丢失类 bug 会导致永不触发），不验证精度，放宽到 1s 留足负载余量
+	waitFired(t, &fired, 1, 1*time.Second)
 	assert.Equal(t, int32(1), fired.Load(), "大延迟任务应最终触发")
 }
 
