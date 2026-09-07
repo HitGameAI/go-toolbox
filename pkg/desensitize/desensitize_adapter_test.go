@@ -11,6 +11,7 @@
 package desensitize
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,17 @@ type TestJsonDesensitizationStruct struct {
 	PhoneNumber string `desensitize:"phoneNumber"`
 	Name        string `desensitize:"name"`
 	Age         int
+}
+
+// 定义 ID 类脱敏测试结构体
+type TestIDDesensitizationStruct struct {
+	UserID     string `desensitize:"userId"`
+	PlayerID   string `desensitize:"playerId"`
+	OpenID     string `desensitize:"openId"`
+	UnionID    string `desensitize:"unionId"`
+	OrderNo    string `desensitize:"orderNo"`
+	DeviceUUID string `desensitize:"uuid"`
+	Account    string `desensitize:"account"`
 }
 
 // 自定义脱敏器示例
@@ -57,6 +69,29 @@ func TestDesensitization(t *testing.T) {
 	assert.Equal(t, "123****7890", testObj.PhoneNumber)
 	assert.Equal(t, "张*", testObj.Name)
 	assert.Equal(t, 30, testObj.Age) // 确保年龄没有被脱敏
+}
+
+func TestDesensitization_IDTypes(t *testing.T) {
+	testObj := &TestIDDesensitizationStruct{
+		UserID:     "1000234567",
+		PlayerID:   "P202400123",
+		OpenID:     "o6_bmjrPTlm6_2sgVt7hMZ3",
+		UnionID:    "o6_bmjrPTlm6_2sgVt7hMZ3fQ",
+		OrderNo:    "ORD2024010112345",
+		DeviceUUID: "550e8400-e29b-41d4-a716-446655440000",
+		Account:    "zhangsan",
+	}
+
+	err := Desensitization(testObj)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "10******67", testObj.UserID)
+	assert.Equal(t, "P2******23", testObj.PlayerID)
+	assert.Equal(t, "o6"+strings.Repeat("*", 19)+"Z3", testObj.OpenID)
+	assert.Equal(t, "o6"+strings.Repeat("*", 20)+"fQ", testObj.UnionID)
+	assert.Equal(t, "OR************45", testObj.OrderNo)
+	assert.Equal(t, "55"+strings.Repeat("*", 32)+"00", testObj.DeviceUUID)
+	assert.Equal(t, "zh****an", testObj.Account)
 }
 
 func TestDesensitization_NonStruct(t *testing.T) {

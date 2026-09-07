@@ -26,4 +26,10 @@ const (
 	PEMKey                                     // PEM 密钥内容（私钥/证书等）
 	APIKey                                     // API Key（保留首尾各若干位）
 	Secret                                     // Secret Key（保留首尾各若干位）
+	UserID                                     // 用户ID（保留首尾各若干位）
+	PlayerID                                   // 玩家ID（保留首尾各若干位）
+	OrderNo                                    // 订单号（保留首尾各若干位）
+	UUID                                       // 通用唯一标识符/设备ID（保留首尾各若干位）
+	OpenID                                     // 第三方开放平台ID（保留首尾各若干位）
+	Account                                    // 账号（保留首尾各若干位）
 )

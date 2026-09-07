@@ -114,6 +114,42 @@ func TestDesensitizeAllTypes(t *testing.T) {
 			desensitizeType: PEMKey,
 			option:          desensitizeOptions,
 		},
+		"TestUserID": {
+			input:           "1000234567",
+			expected:        "10******67",
+			desensitizeType: UserID,
+			option:          desensitizeOptions,
+		},
+		"TestPlayerID": {
+			input:           "P202400123",
+			expected:        "P2******23",
+			desensitizeType: PlayerID,
+			option:          desensitizeOptions,
+		},
+		"TestOrderNo": {
+			input:           "ORD2024010112345",
+			expected:        "OR************45",
+			desensitizeType: OrderNo,
+			option:          desensitizeOptions,
+		},
+		"TestUUID": {
+			input:           "550e8400-e29b-41d4-a716-446655440000",
+			expected:        "55" + strings.Repeat("*", 32) + "00",
+			desensitizeType: UUID,
+			option:          desensitizeOptions,
+		},
+		"TestOpenID": {
+			input:           "o6_bmjrPTlm6_2sgVt7hMZ3",
+			expected:        "o6" + strings.Repeat("*", 19) + "Z3",
+			desensitizeType: OpenID,
+			option:          desensitizeOptions,
+		},
+		"TestAccount": {
+			input:           "zhangsan",
+			expected:        "zh****an",
+			desensitizeType: Account,
+			option:          desensitizeOptions,
+		},
 	}
 
 	for name, tc := range testCases {
@@ -149,4 +185,17 @@ func TestIPv6(t *testing.T) {
 
 func TestSensitizePEMKey(t *testing.T) {
 	assert.Equal(t, strings.Repeat("*", len("short-secret")), SensitizePEMKey("short-secret", 16, 16))
+}
+
+func TestDesensitizeIDCustomOptions(t *testing.T) {
+	opt := NewDesensitizeOptions()
+	opt.IDPrefixVisibleLen = 4
+	opt.IDSuffixVisibleLen = 4
+	assert.Equal(t, "1000**4567", Desensitize("1000234567", UserID, opt))
+	assert.Equal(t, "ORD2****2345", Desensitize("ORD2024010112345", OrderNo, opt))
+
+	// 短字符串：前后缀可见长度之和大于等于长度时全掩码
+	assert.Equal(t, "****", Desensitize("1234", UserID, NewDesensitizeOptions()))
+	// 空字符串直接返回
+	assert.Equal(t, "", Desensitize("", PlayerID))
 }

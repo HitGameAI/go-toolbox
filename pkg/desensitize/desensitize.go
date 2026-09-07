@@ -62,6 +62,8 @@ func Desensitize(str string, DesensitizeType DesensitizeType, options ...Desensi
 		newStr = sensitizeSecretSegment(str, opt.APIKeyPrefixVisibleLen, opt.APIKeySuffixVisibleLen)
 	case Secret:
 		newStr = sensitizeSecretSegment(str, opt.SecretPrefixVisibleLen, opt.SecretSuffixVisibleLen)
+	case UserID, PlayerID, OrderNo, UUID, OpenID, Account:
+		newStr = sensitizeSecretSegment(str, opt.IDPrefixVisibleLen, opt.IDSuffixVisibleLen)
 	default:
 		newStr = str
 	}

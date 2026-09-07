@@ -29,6 +29,8 @@ type DesensitizeOptions struct {
 	APIKeySuffixVisibleLen    int
 	SecretPrefixVisibleLen    int
 	SecretSuffixVisibleLen    int
+	IDPrefixVisibleLen        int // ID 类（用户ID/玩家ID/订单号/UUID/OpenID/账号）前缀可见长度
+	IDSuffixVisibleLen        int // ID 类后缀可见长度
 }
 
 // NewDesensitizeOptions 创建带有默认值的 DesensitizeOptions
@@ -49,5 +51,7 @@ func NewDesensitizeOptions() DesensitizeOptions {
 		APIKeySuffixVisibleLen:    4,
 		SecretPrefixVisibleLen:    4,
 		SecretSuffixVisibleLen:    4,
+		IDPrefixVisibleLen:        2,
+		IDSuffixVisibleLen:        2,
 	}
 }
