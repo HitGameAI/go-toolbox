@@ -5,7 +5,7 @@
  * @LastEditTime: 2026-08-20 09:00:00
  * @FilePath: \go-toolbox\pkg\syncx\timewheel.go
  * @Description:
- * 分片时间轮（HashedWheelTimer）——64 分片 + 双向链表 bucket + 惰性取消，
+ * 分片时间轮（HashedWheelTimer）——16 分片 + 双向链表 bucket + 惰性取消，
  * O(1) 调度/取消/刷新，替代 O(N) 全量扫描，适用于百万级连接心跳超时管理
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
@@ -23,7 +23,7 @@ import (
 // ============================================================================
 //
 // 设计要点：
-//   - 64 个 shard 分散锁竞争，每个 shard 独立 wheel + worker goroutine
+//   - 16 个 shard 分散锁竞争，每个 shard 独立 wheel + worker goroutine
 //   - 每个 wheel 是环形 bucket 数组（默认 512），每个 bucket 持有任务双向链表
 //   - FNV-1a hash 分配 shard，与 sharded_registry 模式对齐
 //   - 惰性取消：atomic.Bool 标记，worker 遍历时统一清理（取消 O(1) 无锁开销）
@@ -42,9 +42,9 @@ import (
 //   - 任意大量短/中周期定时任务管理
 
 const (
-	defaultTimerShardCount   = 64                   // 默认分片数（与 sharded_registry 对齐）
-	defaultTimerBucketCount  = 512                  // 默认每分片 bucket 数
-	defaultTimerTickInterval = 1 * time.Millisecond // 默认 tick 间隔（1ms 极致精度，64 分片共 64000 tick/s，CPU 可控）
+	defaultTimerShardCount   = 16                    // 默认分片数（秒级超时场景足够；十万级以上活跃任务时显式调大）
+	defaultTimerBucketCount  = 512                   // 默认每分片 bucket 数
+	defaultTimerTickInterval = 10 * time.Millisecond // 默认 tick 间隔（10ms：16 分片共 1600 tick/s，空转开销可忽略；亚秒级精度需求时显式调小）
 )
 
 // Timer 时间轮定时器接口

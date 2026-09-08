@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -158,6 +159,57 @@ func TestShortFlakeConcurrent(t *testing.T) {
 
 	wg.Wait()
 	assert.Equal(t, 100, len(ids), "应生成 100 个唯一 ID")
+}
+
+// TestShortFlakeCASHighConcurrency CAS 无锁路径高并发唯一性
+// 高并发覆盖两条关键路径：CAS 竞争重试、同毫秒序列耗尽（64/ms）自旋等待下一毫秒
+func TestShortFlakeCASHighConcurrency(t *testing.T) {
+	gen := NewShortFlakeGenerator(7)
+
+	const goroutines = 8
+	const perGoroutine = 500
+
+	ids := make(chan int64, goroutines*perGoroutine)
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				ids <- gen.Generate()
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[int64]bool, goroutines*perGoroutine)
+	for id := range ids {
+		assert.False(t, seen[id], "CAS 并发生成的 ID 应唯一")
+		seen[id] = true
+		// JavaScript Number 安全范围：53 位
+		assert.LessOrEqual(t, id, (int64(1)<<53)-1, "ID 应在 53 位安全范围内")
+	}
+	assert.Equal(t, goroutines*perGoroutine, len(seen), "应生成全部唯一 ID")
+}
+
+// TestShortFlakeIDBitLayout 验证位布局：时间戳(41位) + 节点ID(6位) + 序列号(6位)
+func TestShortFlakeIDBitLayout(t *testing.T) {
+	const nodeID = 42 // 101010b，小于 64
+	gen := NewShortFlakeGenerator(nodeID)
+
+	id := gen.Generate()
+
+	// 节点 ID 应精确落在 6-11 位
+	assert.Equal(t, int64(nodeID), (id>>6)&0x3F, "节点 ID 位应正确编码")
+
+	// 时间戳部分应接近当前时间（epoch 起毫秒数，允许生成到断言之间的时钟漂移）
+	elapsed := id >> 12
+	expected := time.Now().UnixMilli() - 1640995200000
+	assert.InDelta(t, expected, elapsed, 1000, "时间戳部分应接近当前时间")
+
+	// 序列号应在 6 位范围内
+	assert.LessOrEqual(t, id&0x3F, int64(0x3F), "序列号应不超过 6 位")
 }
 
 // BenchmarkShortFlakeGenerator 基准测试

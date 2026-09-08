@@ -13,9 +13,9 @@ package idgen
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,21 +25,18 @@ import (
 // 时间戳(41位) + 机器ID(6位) + 序列号(6位) = 53位
 // 最大值: 9007199254740991 (约 9PB，16位数字)
 type ShortFlakeGenerator struct {
-	epoch    int64  // 自定义纪元（毫秒）
-	nodeID   int64  // 节点ID (0-63)
-	sequence uint64 // 序列号
-	lastTime int64  // 上次生成时间
-	counter  uint64
-	mu       sync.Mutex
+	epoch   int64  // 自定义纪元（毫秒）
+	nodeID  int64  // 节点ID (0-63)
+	state   atomic.Uint64 // 无锁状态：高位 epoch 起毫秒数，低 6 位同毫秒序列号
+	counter uint64
 }
 
 // NewShortFlakeGenerator 创建短 Snowflake 生成器
 // nodeID: 0-63 (支持64个节点)
 func NewShortFlakeGenerator(nodeID int64) *ShortFlakeGenerator {
 	return &ShortFlakeGenerator{
-		epoch:    1640995200000, // 2022-01-01 00:00:00
-		nodeID:   nodeID & 0x3F, // 6位，最大63
-		sequence: 0,
+		epoch:  1640995200000, // 2022-01-01 00:00:00
+		nodeID: nodeID & 0x3F, // 6位，最大63
 	}
 }
 
@@ -110,37 +107,33 @@ func (g *ShortFlakeGenerator) Generate() int64 {
 	return g.generate()
 }
 
-// generate 内部生成方法
+// generate 内部生成方法（无锁 CAS 实现）
+// state 布局：高位为 epoch 起的毫秒数，低 6 位为同毫秒序列号
+// 同毫秒序列耗尽时 CAS 自旋等待下一毫秒，不持有任何锁，其余调用方不受阻
 func (g *ShortFlakeGenerator) generate() int64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	for {
+		old := g.state.Load()
+		now := uint64(time.Now().UnixMilli() - g.epoch)
 
-	now := time.Now().UnixMilli()
-
-	if now < g.lastTime {
-		now = g.lastTime
-	}
-
-	if now == g.lastTime {
-		// 同一毫秒内，序列号递增
-		g.sequence = (g.sequence + 1) & 0x3F // 6位，最大63
-		if g.sequence == 0 {
-			// 序列号溢出，等待下一毫秒
-			for now <= g.lastTime {
-				now = time.Now().UnixMilli()
+		seq := uint64(0)
+		if old>>6 == now {
+			// 同一毫秒内，序列号递增
+			seq = (old & 0x3F) + 1
+			if seq > 0x3F {
+				// 序列号溢出（64/ms 用尽），等待下一毫秒
+				// 旧实现在持锁状态下忙等，会阻塞所有排队者；此处无锁自旋，天然让出
+				runtime.Gosched()
+				continue
 			}
 		}
-	} else {
-		g.sequence = 0
+
+		newState := (now << 6) | seq
+		if g.state.CompareAndSwap(old, newState) {
+			// 时间戳(41位) + 节点ID(6位) + 序列号(6位)
+			return (int64(now) << 12) | (g.nodeID << 6) | int64(seq)
+		}
+		// CAS 失败：并发竞争，重试
 	}
-
-	g.lastTime = now
-
-	// 时间戳(41位) + 节点ID(6位) + 序列号(6位)
-	timestamp := (now - g.epoch) << 12
-	node := g.nodeID << 6
-
-	return timestamp | node | int64(g.sequence)
 }
 
 // ShortFlakeBase62Generator Base62 编码的短 ID 生成器

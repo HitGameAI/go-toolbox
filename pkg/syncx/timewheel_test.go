@@ -614,3 +614,72 @@ func TestTimerBoundaryTicks(t *testing.T) {
 	// 圈计数错误才会延迟到 2 圈（320ms+），断言 300ms 已能可靠拦截
 	assert.Less(t, elapsed2, 300*time.Millisecond, "16 tick（rounds=1）任务应在 2 圈内触发，实际 %v", elapsed2)
 }
+
+// TestHashedWheelTimerDefaults 验证无参构造的库默认值
+// 16 分片 × 10ms tick：秒级超时语义足够，空转开销可忽略（对齐 go-config wsc.TimerConfig 默认值）
+func TestHashedWheelTimerDefaults(t *testing.T) {
+	timer := NewHashedWheelTimer()
+	defer timer.Stop()
+
+	assert.Equal(t, defaultTimerShardCount, timer.shardCount, "默认分片数应为 16")
+	assert.Len(t, timer.shards, defaultTimerShardCount, "应创建 16 个 shard goroutine")
+	for i, shard := range timer.shards {
+		assert.Equal(t, defaultTimerTickInterval, shard.tickInterval, "shard[%d] tick 间隔应为 10ms", i)
+	}
+}
+
+// TestHashedWheelTimerDefaultTickFire 默认 10ms tick 下任务正常触发（不提前、误差 ±1 tick 内）
+func TestHashedWheelTimerDefaultTickFire(t *testing.T) {
+	timer := NewHashedWheelTimer()
+	defer timer.Stop()
+
+	done := make(chan time.Time, 1)
+	timer.Schedule(100*time.Millisecond, func() {
+		done <- time.Now()
+	})
+
+	start := time.Now()
+	select {
+	case fired := <-done:
+		elapsed := fired.Sub(start)
+		// 向上取整保证不提前触发；100ms 延迟 + 10ms tick 下最多晚一个 tick + 调度余量
+		assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "任务不应提前触发")
+		assert.LessOrEqual(t, elapsed, 200*time.Millisecond, "任务触发延迟应在一个 tick + 调度余量内")
+	case <-time.After(3 * time.Second):
+		t.Fatal("默认 tick 配置下任务应在 3s 内触发")
+	}
+}
+
+// TestHashedWheelTimerDefaultStats 默认配置下统计信息准确
+func TestHashedWheelTimerDefaultStats(t *testing.T) {
+	timer := NewHashedWheelTimer()
+	defer timer.Stop()
+
+	const taskCount = 100
+	var completed atomic.Int64
+	done := make(chan struct{})
+	for i := 0; i < taskCount; i++ {
+		timer.Schedule(20*time.Millisecond, func() {
+			completed.Add(1)
+		})
+	}
+
+	go func() {
+		for completed.Load() < taskCount {
+			time.Sleep(10 * time.Millisecond)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("任务未全部完成: %d/%d", completed.Load(), taskCount)
+	}
+
+	// 等统计计数落地
+	time.Sleep(50 * time.Millisecond)
+	stats := timer.Stats()
+	assert.Equal(t, int64(taskCount), stats.CompletedTasks, "完成任务数应准确")
+	assert.Equal(t, int64(0), stats.ActiveTasks, "全部完成后活跃任务应为 0")
+}

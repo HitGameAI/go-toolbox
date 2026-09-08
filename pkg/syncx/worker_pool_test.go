@@ -14,6 +14,7 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,4 +257,230 @@ func TestWorkerPoolContextTimeout(t *testing.T) {
 	assert.Equal(t, context.DeadlineExceeded, err)
 
 	close(blockChan)
+}
+
+// TestWorkerPoolElasticInitialWorkers 构造时仅启动保底数量 worker（min(4, workers)）
+func TestWorkerPoolElasticInitialWorkers(t *testing.T) {
+	pool := NewWorkerPool(8, 100)
+	defer pool.Close()
+
+	assert.Equal(t, 4, pool.GetActiveWorkerCount(), "初始应只启动保底 4 个 worker")
+	assert.Equal(t, 8, pool.GetWorkerCount(), "worker 上限应保持 8")
+}
+
+// TestWorkerPoolElasticGrowOnBacklog 队列积压触发扩容至上限
+func TestWorkerPoolElasticGrowOnBacklog(t *testing.T) {
+	pool := NewWorkerPool(8, 100)
+	defer pool.Close()
+
+	// 提交 8 个阻塞任务：前 4 个占满初始 worker，后 4 个形成积压触发扩容
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+
+	for i := 0; i < 8; i++ {
+		err := pool.Submit(context.Background(), func() {
+			started <- struct{}{}
+			<-release
+		})
+		assert.NoError(t, err)
+	}
+
+	// 等待全部 8 个任务开始执行（隐含要求 active 达到 8）
+	for i := 0; i < 8; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("任务未全部开始，扩容未生效")
+		}
+	}
+
+	assert.Equal(t, 8, pool.GetActiveWorkerCount(), "积压应触发扩容至 8 上限")
+
+	close(release)
+	pool.Wait()
+}
+
+// TestWorkerPoolElasticShrinkIdle 空闲超过 idleTimeout 自动回收至保底数量
+func TestWorkerPoolElasticShrinkIdle(t *testing.T) {
+	pool := NewWorkerPool(8, 100, WithPoolIdleTimeout(150*time.Millisecond))
+	defer pool.Close()
+
+	// 先扩容到 8
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		_ = pool.Submit(context.Background(), func() {
+			started <- struct{}{}
+			<-release
+		})
+	}
+	for i := 0; i < 8; i++ {
+		<-started
+	}
+	close(release)
+	pool.Wait()
+
+	assert.Equal(t, 8, pool.GetActiveWorkerCount(), "任务执行期间应保持 8 个 worker")
+
+	// 空闲等待 3.5 倍 idleTimeout，worker 应回收至保底 4
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.GetActiveWorkerCount() <= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	assert.LessOrEqual(t, pool.GetActiveWorkerCount(), 4, "空闲后应回收至保底数量")
+
+	// 回收后池仍可正常工作
+	var executed atomic.Int32
+	err := pool.Submit(context.Background(), func() { executed.Add(1) })
+	assert.NoError(t, err)
+	pool.Wait()
+	assert.Equal(t, int32(1), executed.Load(), "回收后池应能继续处理任务")
+}
+
+// TestWorkerPoolElasticMinFloor workers 上限低于默认保底数量时以 workers 为下限
+func TestWorkerPoolElasticMinFloor(t *testing.T) {
+	pool := NewWorkerPool(3, 10, WithPoolIdleTimeout(100*time.Millisecond))
+	defer pool.Close()
+
+	// minWorkers = min(4, 3) = 3
+	assert.Equal(t, 3, pool.GetActiveWorkerCount(), "小池初始应全部启动")
+
+	// 空闲足够久，不应回收任何 worker（已到下限）
+	time.Sleep(400 * time.Millisecond)
+	assert.Equal(t, 3, pool.GetActiveWorkerCount(), "达到下限后不应继续回收")
+}
+
+// TestWorkerPoolIdleTimeoutOptionInvalid 非法 idleTimeout（<=0）应忽略并保持默认
+func TestWorkerPoolIdleTimeoutOptionInvalid(t *testing.T) {
+	pool := NewWorkerPool(4, 10, WithPoolIdleTimeout(0))
+	defer pool.Close()
+
+	assert.Equal(t, defaultPoolIdleTimeout, pool.idleTimeout, "非法值应保持默认超时")
+}
+
+// TestWorkerPoolElasticCloseDuringWork 扩容状态下直接 Close 不死锁、in-flight 任务执行完
+func TestWorkerPoolElasticCloseDuringWork(t *testing.T) {
+	pool := NewWorkerPool(8, 100)
+	defer pool.Close()
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	var completed atomic.Int32
+	for i := 0; i < 8; i++ {
+		_ = pool.Submit(context.Background(), func() {
+			started <- struct{}{}
+			<-release
+			completed.Add(1)
+		})
+	}
+
+	// 等待全部任务被 worker 取走（真正 in-flight）后再关闭
+	// Submit 返回仅代表入队；不等待就 Close 的话，worker 的 select 在 ctx.Done 与队列间随机选择，
+	// 排队任务可能在被取走前被 Close 的 drain 丢弃（慢速机器上必现）
+	for i := 0; i < 8; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("任务未全部被 worker 取走，扩容未生效")
+		}
+	}
+
+	// 任务阻塞中直接 Close：wg.Wait 应等待 worker，不 panic 不死锁
+	close(release)
+	done := make(chan struct{})
+	go func() {
+		_ = pool.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close 在任务执行期间不应死锁")
+	}
+	assert.Equal(t, int32(8), completed.Load(), "in-flight 任务应全部执行完")
+}
+
+// TestWorkerPoolElasticConcurrentStress 并发提交下弹性伸缩的任务不丢不重
+func TestWorkerPoolElasticConcurrentStress(t *testing.T) {
+	pool := NewWorkerPool(16, 1024, WithPoolIdleTimeout(100*time.Millisecond))
+	defer pool.Close()
+
+	const producers = 8
+	const perProducer = 200
+	var executed atomic.Int32
+
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perProducer; i++ {
+				assert.NoError(t, pool.Submit(context.Background(), func() {
+					executed.Add(1)
+				}))
+			}
+		}()
+	}
+	wg.Wait()
+	pool.Wait()
+
+	assert.Equal(t, int32(producers*perProducer), executed.Load(), "全部任务应恰好执行一次")
+
+	// 压测中应发生过扩容（生产速度高于 16 个保底 worker 的消费速度时）
+	// 不做硬断言：单机调度下扩容与否取决于时序，仅验证正确性
+}
+
+// TestWorkerPoolElasticRegrow 回收后再次积压能重新扩容
+func TestWorkerPoolElasticRegrow(t *testing.T) {
+	pool := NewWorkerPool(8, 100, WithPoolIdleTimeout(100*time.Millisecond))
+	defer pool.Close()
+
+	// 第一轮：扩容到 8 后空闲回收到 4
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		_ = pool.Submit(context.Background(), func() {
+			started <- struct{}{}
+			<-release
+		})
+	}
+	for i := 0; i < 8; i++ {
+		<-started
+	}
+	close(release)
+	pool.Wait()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.GetActiveWorkerCount() <= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	assert.LessOrEqual(t, pool.GetActiveWorkerCount(), 4, "第一轮空闲后应回收")
+
+	// 第二轮：再次积压应重新扩容
+	release2 := make(chan struct{})
+	started2 := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		_ = pool.Submit(context.Background(), func() {
+			started2 <- struct{}{}
+			<-release2
+		})
+	}
+	for i := 0; i < 8; i++ {
+		select {
+		case <-started2:
+		case <-time.After(3 * time.Second):
+			t.Fatal("回收后再次积压未触发扩容")
+		}
+	}
+	assert.Equal(t, 8, pool.GetActiveWorkerCount(), "第二轮应重新扩容至上限")
+
+	close(release2)
+	pool.Wait()
 }
